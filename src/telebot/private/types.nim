@@ -4,6 +4,7 @@ import asyncdispatch, options, tables, httpclient
 converter optionToBool*[T](o: Option[T]): bool = o.isSome()
 
 type
+  InputFileOrString* = string
   TelegramObject* = object of RootObj
 
   UpdateCallback* = proc(bot: Telebot, update: Update): Future[bool] {.gcsafe.}

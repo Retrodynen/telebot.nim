@@ -8,8 +8,8 @@ const
   API_URL* = "https://api.telegram.org/bot$#/"
   FILE_URL* = "https://api.telegram.org/file/bot$#/$#"
 
-template END_POINT*(`method`: string) =
-  let endpoint {.used, inject.} = API_URL & `method`
+template END_POINT*(name: string) =
+  let endpoint {.used, inject.} = API_URL & name
 
 template hasCommand*(update: Update, username: string): bool =
   var
@@ -142,6 +142,8 @@ proc marshal*[T](t: T, s: var string) =
       else:
         s.add("null")
 
+proc marshal*[T](t: T): string = marshal(t, result)
+
 proc put*[T](s: var seq[T], n: JsonNode) {.inline.} =
   s.add(unmarshal(n, T))
 
@@ -158,7 +160,6 @@ proc unref*[T: TelegramObject](r: ref T, n: JsonNode ): ref T {.inline.} =
     result.type = kReplyKeyboardRemove
   elif result is ForceReply:
     result.type = kForceReply
-
 
 proc toOption*[T](o: var Option[T], n: JsonNode) {.inline.} =
   when T is TelegramObject:
@@ -198,18 +199,6 @@ proc makeRequest*(b: Telebot, endpoint: string, data: MultipartData = nil): Futu
 
 proc getMessage*(n: JsonNode): Message {.inline.} =
   result = unmarshal(n, Message)
-
-proc newProcDef(name: string): NimNode {.compileTime.} =
-   result = newNimNode(nnkProcDef)
-   result.add(postfix(ident(name), "*"))
-   result.add(
-     newEmptyNode(),
-     newEmptyNode(),
-     newNimNode(nnkFormalParams),
-     newEmptyNode(),
-     newEmptyNode(),
-     newStmtList()
-   )
 
 proc addData*(p: var MultipartData, name: string, content: auto, fileCheck = false) {.inline.} =
   when content is string:
@@ -252,122 +241,144 @@ macro genInputMedia*(mediaType: untyped): untyped =
         inputMedia.parseMode = some(parseMode)
       return inputMedia
 
-macro magic*(head, body: untyped): untyped =
-  result = newStmtList()
-
+macro botapi*(node: untyped) : untyped =
+  if node.kind != nnkProcDef:
+    return
+  result = node
+  #echo treeRepr(result)
   var
-    objNameNode: NimNode
+    apiName: string
+    params = result[3]
+    param: NimNode
+    pragma: NimNode
+    body = newStmtList()
 
-  if head.kind == nnkIdent:
-    objNameNode = head
+  # api same as proc name
+  if result[0].kind == nnkIdent:
+    apiName = $result[0]
   else:
-    quit "Invalid node: " & head.lispRepr
+    apiName = $result[0][1]
+  # pragma
+  if result[4].kind == nnkEmpty:
+    result[4] = newNimNode(nnkPragma)
+  result[4].add(ident("async"))
 
-  var
-    objectTy = newNimNode(nnkObjectTy)
-
-  objectTy.add(newEmptyNode(), newEmptyNode())
-
-  var
-    objName = $objNameNode & "Object"
-    objParamList = newNimNode(nnkRecList)
-    objInitProc = newProcDef("new" & $objNameNode)
-    objSendProc = newProcDef("send")
-    objInitProcParams = objInitProc[3]
-    objInitProcBody = objInitProc[6]
-    objSendProcParams = objSendProc[3]
-    objSendProcBody = objSendProc[6]
-
-  objSendProc[4] = newNimNode(nnkPragma).add(ident("async"), ident("discardable"), ident("deprecated"))
-
-  objectTy.add(objParamList)
-  objInitProcParams.add(ident(objName))
-
-  objSendProcParams.add(newNimNode(nnkBracketExpr).add(
-    ident("Future"), ident("Message")) # return value
-  ).add(newIdentDefs(ident("b"), ident("TeleBot"))
-  ).add(newIdentDefs(ident("m"), ident(objName)))
-
-  objSendProcBody.add(newConstStmt(
+  # prologue
+  body.add(newLetStmt(
     ident("endpoint"),
-    infix(ident("API_URL"), "&", newStrLitNode("send" & $objNameNode))
+    infix(ident("API_URL"), "&", newStrLitNode(apiName))
   )).add(newVarStmt(
       ident("data"),
       newCall(ident("newMultipartData"))
   ))
+  for param in params:
+    if param.kind != nnkIdentDefs:
+      continue
 
-  for node in body:
-    let fieldName = $node[0]
+    var
+      paramName = param[0]
+      paramKind = param[1]
+      paramDefault = param[2]
+      name = formatName($paramName)
 
-    case node[1][0].kind
-    of nnkIdent:
-      var identDefs = newIdentDefs(
-        node[0],
-        node[1][0] # objInitProcBody -> Ident
-      )
-      objParamList.add(identDefs)
-      objInitProcParams.add(identDefs)
-      objInitProcBody.add(newAssignment(
-        newDotExpr(ident("result"), node[0]),
-        node[0]
-      ))
+    #if $paramName == "maskPosition":
+    #  echo treeRepr(param)
 
-      # dirty hack to determine if the field might be `InputFile`
-      # if  field is InputFile or string, `addData` will checks if it starts w/ file://
-      # and do file upload
-      var fileCheck = ident("false")
-      if toLowerAscii(fieldName) == toLowerAscii($objNameNode):
-        fileCheck = ident("true")
-
-
-      objSendProcBody.add(
-        newCall(
-          ident("addData"),
-          ident("data"),
-          newStrLitNode(formatName(fieldName)),
-          newDotExpr(ident("m"), node[0]),
-          fileCheck
-      ))
-
-    of nnkPragmaExpr:
-      objParamList.add(
-        newIdentDefs(
-          postfix(node[0], "*"),
-          node[1][0][0] # stmtList -> pragma -> ident
+    if paramKind.kind == nnkIdent and toLowerAscii($paramKind) == "telebot":
+      continue
+    var leftSide = newNimNode(nnkBracketExpr)
+                    .add(ident("data"))
+                    .add(newStrLitNode(name))
+    if paramKind.kind != nnkEmpty and paramDefault.kind == nnkEmpty:
+      # mandatory params
+      if paramKind.kind == nnkIdent:
+        if $paramKind == "string":
+          body.add(newAssignment(leftSide, ident($paramName)))
+        elif $paramKind == "InputFileOrString":
+          body.add(newCall(
+            ident("addData"),
+            ident("data"),
+            newStrLitNode($paramName),
+            paramName,
+            ident("true")
+          ))
+      elif paramKind.kind == nnkBracketExpr and $paramKind[0] == "seq":
+        body.add(newAssignment(leftSide, newCall("marshal", paramName)))
+      else:
+        body.add(newAssignment(leftSide, prefix(paramName, "$")))
+    elif paramKind.kind == nnkEmpty and paramDefault.kind != nnkEmpty:
+      # optional param with out type
+      if paramDefault.kind == nnkStrLit:
+        body.add(quote do:
+          if `paramName`.len != 0:
+            data[`name`] = `paramName`
         )
-      )
-
-      var ifStmt = newNimNode(nnkIfStmt).add(
-        newNimNode(nnkElifBranch).add(
-          newCall(
-            ident("isSet"),
-            newDotExpr(ident("m"), node[0])
-          ),
-          newStmtList(
-            newCall(
-              ident("addData"),
-              ident("data"),
-              newStrLitNode(formatName(fieldName)),
-              newDotExpr(ident("m"), node[0])
-            )
-          )
+      elif paramDefault.kind == nnkIntLit:
+        body.add(quote do:
+          if `paramName` != `paramDefault`:
+            data[`name`] = $`paramName`
         )
-      )
-      objSendProcBody.add(ifStmt)
+      elif paramDefault.kind == nnkIdent and $paramDefault in ["true", "false"]:
+        body.add(quote do:
+          if `paramName`:
+            data[`name`] = "true"
+        )
+      else:
+        body.add(quote do:
+          if `paramName`.isSome():
+            data[`name`] = marshal(`paramName`)
+        )
+        #echo treeRepr(param)
     else:
-      # silently ignore unsupported node
-      discard
-
+      # optional param with type
+      if paramKind.kind == nnkIdent and $paramKind == "InputFileOrString":
+        body.add(quote do:
+          if `paramName`.len != 0:
+            data.addData(`name`, paramName, true)
+        )
+      else:
+        if paramKind.kind == nnkBracketExpr:
+          # seq
+          body.add(quote do:
+            if `paramName`.len != 0:
+              data[`name`] = $`paramName`
+          )
+          echo treeRepr(paramKind)
+        else:
+          body.add(quote do:
+            if `paramName` != nil:
+              data[`name`] = $`paramName`
+          )
   var epilogue = parseStmt("""
-try:
-  let res = await makeRequest(b, endpoint % b.token, data)
-  result = unmarshal(res, Message)
-except:
-  echo "Got exception ", repr(getCurrentException()), " with message: ", getCurrentExceptionMsg()
+let res = await makeRequest(`b`, `endpoint` % `b`.token, data)
 """)
-  objSendProcBody.add(epilogue[0])
+  body.add(epilogue[0])
+  var retType = ""
+  if params[0][1].kind == nnkIdent:
+    retType = $params[0][1]
+  if retType == "Message":
+    body.add(newAssignment(
+      ident("result"),
+      newCall("getMessage", ident("res"))
+    ))
+  elif retType == "bool":
+    body.add(newAssignment(
+      ident("result"),
+      newCall("toBool", ident("res"))
+    ))
+  elif retType == "int":
+    body.add(newAssignment(
+      ident("result"),
+      newCall("toInt", ident("res"))
+    ))
+  elif retType == "void":
+    discard
+  else:
+    body.add(newAssignment(
+      ident("result"),
+      newCall("unmarshal", ident("res"), params[0][1])
+    ))
 
-  result.add(newNimNode(nnkTypeSection).add(
-    newNimNode(nnkTypeDef).add(postfix(ident(objName), "*"), newEmptyNode(), objectTy)
-  ))
-  result.add(objInitProc, objSendProc)
+  # set proc body
+  result[6] = body
+  #echo treeRepr(result)
