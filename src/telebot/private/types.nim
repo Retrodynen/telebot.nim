@@ -38,7 +38,7 @@ type
     inlineQueryCallbacks*: seq[InlineQueryCallback]
     serverUrl*: string
     proxy*: Proxy
-    id*: int
+    id*: int64
     username*: string
 
   Command* = object of TelegramObject
@@ -47,7 +47,7 @@ type
     params*: string
 
   User* = object of TelegramObject
-    id*: int
+    id*: int64
     isBot*: bool
     firstName*: string
     lastName*: Option[string]

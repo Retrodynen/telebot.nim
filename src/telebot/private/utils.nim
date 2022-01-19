@@ -57,6 +57,8 @@ proc isSet*(value: auto): bool {.inline.} =
     result = value.len > 0
   elif value is int:
     result = value != 0
+  elif value is int64:
+    result = value != 0
   elif value is bool:
     result = value
   elif value is object:
